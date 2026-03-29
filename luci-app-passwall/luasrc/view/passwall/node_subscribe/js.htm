@@ -119,7 +119,6 @@ table .cbi-button-down {
 		}
 
 		if (sectionIds.length === 0) {
-			//alert("No subscriptions found.");
 			return;
 		}
 
@@ -137,6 +136,26 @@ table .cbi-button-down {
 				alert(data.msg || "Operation failed");
 			} else {
 				window.location.href = '<%= api.url("log") %>'
+			}
+		});
+	}
+
+	function ExportNodesAsSubscribe() {
+		window.open('<%= api.url("export_nodes_as_subscribe") %>?raw=1', '_blank');
+	}
+
+	function ExportNodesAsSubscribeBase64() {
+		window.open('<%= api.url("export_nodes_as_subscribe") %>', '_blank');
+	}
+
+	function CustomUpdatePasswall() {
+		if (!confirm('确定执行自定义 PassWall 更新吗？')) return;
+		fetch('<%= api.url("custom_update_passwall") %>')
+		.then(response => response.json())
+		.then(data => {
+			alert((data && data.msg) ? data.msg : '已执行自定义更新');
+			if (data && data.success) {
+				window.location.href = '<%= api.url("log") %>';
 			}
 		});
 	}

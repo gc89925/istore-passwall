@@ -1,0 +1,7 @@
+{
+  "version": "26.3.6-laogao.1",
+  "packages": [
+    "luci-app-passwall_all.ipk"
+  ],
+  "notes": "Custom PassWall build for 老高"
+}

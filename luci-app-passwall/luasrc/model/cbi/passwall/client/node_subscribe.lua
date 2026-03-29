@@ -145,6 +145,21 @@ o.cfgvalue = function(self, section)
 	 translate("Manual subscription All"))
 end
 
+o = s:option(DummyValue, "_export", "导出当前节点为订阅文本")
+o.rawhtml = true
+o.cfgvalue = function(self, section)
+    return [[
+		<input type="button" class="btn cbi-button cbi-button-edit" onclick="ExportNodesAsSubscribe()" value="导出节点(raw)" />
+		<input type="button" class="btn cbi-button cbi-button-edit" onclick="ExportNodesAsSubscribeBase64()" value="导出节点(base64)" />
+	]]
+end
+
+o = s:option(DummyValue, "_custom_update", "更新自定义 PassWall")
+o.rawhtml = true
+o.cfgvalue = function(self, section)
+    return [[<input type="button" class="btn cbi-button cbi-button-apply" onclick="CustomUpdatePasswall()" value="自定义更新" />]]
+end
+
 s = m:section(TypedSection, "subscribe_list", "", "<font color='red'>" .. translate("When adding a new subscription, please save and apply before manually subscribing. If you only change the subscription URL, you can subscribe manually, and the system will save it automatically.") .. "</font>")
 s.addremove = true
 s.anonymous = true

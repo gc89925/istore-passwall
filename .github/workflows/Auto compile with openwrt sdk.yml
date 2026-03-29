@@ -75,9 +75,6 @@ jobs:
           echo "" >>release.txt
           echo "### 方式 2：手动下载并安装 / Method 2: Manual Download and Install" >>release.txt
           echo "" >>release.txt
-          echo "* 从 [SourceForge](https://sourceforge.net/projects/openwrt-passwall-build/files/) 下载预构建的软件包。" >>release.txt
-          echo "  Download prebuilt packages from [SourceForge](https://sourceforge.net/projects/openwrt-passwall-build/files/)." >>release.txt
-          echo "" >>release.txt
           echo "* 将文件上传到您的设备，使用 Shell 命令进行安装。" >>release.txt
           echo "  Upload files to your device, install it with shell command." >>release.txt
           echo "" >>release.txt
@@ -85,13 +82,15 @@ jobs:
           echo "\`\`\`" >>release.txt
           echo "opkg install /path/to/package.ipk" >>release.txt
           echo "\`\`\`" >>release.txt
-          echo "apk" >>release.txt
-          echo "\`\`\`" >>release.txt
-          echo "apk add /path/to/package.apk" >>release.txt
-          echo "\`\`\`" >>release.txt
           echo "" >>release.txt
           echo ":warning: 请将 /path/to/package 替换为实际下载的软件包路径。" >>release.txt
           echo "- Replace /path/to/package with the actual path of the downloaded packages." >>release.txt
+          echo "" >>release.txt
+          echo "### 自定义更新 / Custom Update" >>release.txt
+          echo "" >>release.txt
+          echo "本仓库的 LuCI 自定义更新按钮会优先读取 release 中的 manifest.json，然后按 packages 顺序安装。" >>release.txt
+          echo "The custom LuCI update button in this repository will prefer manifest.json in the release and install packages in order." >>release.txt
+          echo "" >>release.txt
           touch release.txt
 
       - name: Generate new tag & release
@@ -188,7 +187,21 @@ jobs:
           mkdir upload
           mv bin/packages/*/passwall/luci-* upload/
           cd upload
-          for i in $(ls); do mv $i ${{ matrix.ver }}_$i; done
+          primary_pkg=$(ls luci-app-passwall*.ipk 2>/dev/null | head -n1 || true)
+          pkg_json='[]'
+          if [ -n "$primary_pkg" ]; then
+            cp "$primary_pkg" luci-app-passwall_all.ipk
+            pkg_json=$(printf '%s\n%s\n' '"luci-app-passwall_all.ipk"' "\"$primary_pkg\"" | awk '!seen[$0]++' | jq -R . | jq -s .)
+          fi
+          cat > manifest.json <<EOF
+          {
+            "version": "${{needs.job_check.outputs.passwall_version}}",
+            "packages": ${pkg_json},
+            "notes": "Custom PassWall build for ${{ github.repository }}"
+          }
+          EOF
+          for i in $(ls *.ipk); do mv "$i" "${{ matrix.ver }}_$i"; done
+          mv "${{ matrix.ver }}_luci-app-passwall_all.ipk" luci-app-passwall_all.ipk || true
           echo "status=success" >> $GITHUB_OUTPUT
           echo "FIRMWARE=$PWD" >> $GITHUB_ENV
 
@@ -199,4 +212,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{needs.job_check.outputs.passwall_version}}
-          files: ${{ env.FIRMWARE }}/*
+          files: |
+            ${{ env.FIRMWARE }}/*
+            ${{ env.FIRMWARE }}/manifest.json

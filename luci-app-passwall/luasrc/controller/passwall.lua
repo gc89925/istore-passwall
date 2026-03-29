@@ -95,6 +95,9 @@ function index()
 	entry({"admin", "services", appname, "subscribe_del_all"}, call("subscribe_del_all")).leaf = true
 	entry({"admin", "services", appname, "subscribe_manual"}, call("subscribe_manual")).leaf = true
 	entry({"admin", "services", appname, "subscribe_manual_all"}, call("subscribe_manual_all")).leaf = true
+	entry({"admin", "services", appname, "export_nodes_as_subscribe"}, call("export_nodes_as_subscribe")).leaf = true
+	entry({"admin", "services", appname, "check_nodes_status"}, call("check_nodes_status")).leaf = true
+	entry({"admin", "services", appname, "custom_update_passwall"}, call("custom_update_passwall")).leaf = true
 	entry({"admin", "services", appname, "flush_set"}, call("flush_set")).leaf = true
 
 	--[[rule_list]]
@@ -1011,6 +1014,306 @@ function subscribe_manual_all()
 	end
 	luci.sys.call("lua /usr/share/" .. appname .. "/subscribe.lua start all manual >/dev/null 2>&1 &")
 	http_write_json({ success = true, msg = "Subscribe triggered." })
+end
+
+function export_nodes_as_subscribe()
+	local group = http.formvalue("group") or ""
+	local raw = http.formvalue("raw") == "1"
+	local links = {}
+	local unsupported = {}
+	local function q(v)
+		return v and api.UrlEncode(v) or ""
+	end
+	local function b64(v)
+		return v and api.base64Encode(v) or ""
+	end
+	local function add_unsupported(node, reason)
+		unsupported[#unsupported + 1] = string.format("# UNSUPPORTED | %s | %s | %s", node.group or "default", node.remarks or node[".name"] or "unknown", reason or "unsupported")
+	end
+	local function build_ss(node)
+		if not node.address or not node.port or not node.method or not node.password then return nil end
+		local userinfo = b64((node.method or "") .. ":" .. (node.password or ""))
+		local link = "ss://" .. userinfo .. "@" .. node.address .. ":" .. node.port
+		local params = {}
+		if node.plugin_enabled == "1" and node.plugin and node.plugin ~= "none" then
+			local plugin = node.plugin
+			if node.plugin_opts and node.plugin_opts ~= "" then
+				plugin = plugin .. ";" .. node.plugin_opts
+			end
+			params[#params + 1] = "plugin=" .. q(plugin)
+		end
+		if #params > 0 then link = link .. "?" .. table.concat(params, "&") end
+		link = link .. "#" .. q(node.remarks or (node.address .. ":" .. node.port))
+		return link
+	end
+	local function build_ssr(node)
+		if not node.address or not node.port or not node.method or not node.password or not node.protocol or not node.obfs then return nil end
+		local password = b64(node.password)
+		local main = string.format("%s:%s:%s:%s:%s:%s", node.address, node.port, node.protocol, node.method, node.obfs, password)
+		local params = {
+			"remarks=" .. b64(node.remarks or (node.address .. ":" .. node.port))
+		}
+		if node.obfs_param and node.obfs_param ~= "" then params[#params + 1] = "obfsparam=" .. b64(node.obfs_param) end
+		if node.protocol_param and node.protocol_param ~= "" then params[#params + 1] = "protoparam=" .. b64(node.protocol_param) end
+		return "ssr://" .. b64(main .. "/?" .. table.concat(params, "&"))
+	end
+	local function build_trojan(node)
+		if not node.address or not node.port or not node.password then return nil end
+		local params = {}
+		local transport = node.transport or "tcp"
+		if transport == "raw" then transport = "tcp" end
+		if transport == "xhttp" then transport = "http" end
+		if transport and transport ~= "" and transport ~= "tcp" then params[#params + 1] = "type=" .. q(transport) end
+		if node.tls == "1" then
+			if node.tls_serverName and node.tls_serverName ~= "" then params[#params + 1] = "sni=" .. q(node.tls_serverName) end
+			if node.tls_allowInsecure ~= nil and node.tls_allowInsecure ~= "" then params[#params + 1] = "allowInsecure=" .. q(node.tls_allowInsecure) end
+			if node.alpn and node.alpn ~= "" then params[#params + 1] = "alpn=" .. q(node.alpn) end
+			if node.fingerprint and node.fingerprint ~= "" then params[#params + 1] = "fp=" .. q(node.fingerprint) end
+		end
+		if transport == "ws" then
+			if node.ws_path and node.ws_path ~= "" then params[#params + 1] = "path=" .. q(node.ws_path) end
+			if node.ws_host and node.ws_host ~= "" then params[#params + 1] = "host=" .. q(node.ws_host) end
+		elseif transport == "grpc" then
+			if node.grpc_serviceName and node.grpc_serviceName ~= "" then params[#params + 1] = "serviceName=" .. q(node.grpc_serviceName) end
+			if node.grpc_mode and node.grpc_mode ~= "" then params[#params + 1] = "mode=" .. q(node.grpc_mode) end
+		elseif transport == "httpupgrade" then
+			if node.httpupgrade_path and node.httpupgrade_path ~= "" then params[#params + 1] = "path=" .. q(node.httpupgrade_path) end
+			if node.httpupgrade_host and node.httpupgrade_host ~= "" then params[#params + 1] = "host=" .. q(node.httpupgrade_host) end
+		elseif transport == "http" then
+			local _path = node.http_path or node.xhttp_path or ""
+			local _host = first_of(node.http_host)
+			if _host == "" then _host = node.xhttp_host or "" end
+			if _path ~= "" then params[#params + 1] = "path=" .. q(_path) end
+			if _host ~= "" then params[#params + 1] = "host=" .. q(_host) end
+		end
+		local link = "trojan://" .. q(node.password) .. "@" .. node.address .. ":" .. node.port
+		if #params > 0 then link = link .. "?" .. table.concat(params, "&") end
+		link = link .. "#" .. q(node.remarks or (node.address .. ":" .. node.port))
+		return link
+	end
+	local function first_of(v)
+		if type(v) == "table" then return v[1] or "" end
+		return v or ""
+	end
+	local function build_vmess(node)
+		if not node.address or not node.port or not node.uuid then return nil end
+		local net = node.transport or "tcp"
+		if net == "raw" then net = "tcp" end
+		if net == "xhttp" then net = "http" end
+		local host = first_of(node.http_host)
+		local path = node.http_path or ""
+		if net == "ws" then
+			host = node.ws_host or host
+			path = node.ws_path or path
+		elseif net == "grpc" then
+			path = node.grpc_serviceName or path
+		elseif net == "httpupgrade" then
+			host = node.httpupgrade_host or host
+			path = node.httpupgrade_path or path
+		elseif node.xhttp_host or node.xhttp_path then
+			host = node.xhttp_host or host
+			path = node.xhttp_path or path
+		elseif node.tcp_guise == "http" then
+			host = first_of(node.tcp_guise_http_host)
+			path = first_of(node.tcp_guise_http_path)
+		end
+		local obj = {
+			v = "2",
+			ps = node.remarks or (node.address .. ":" .. node.port),
+			add = node.address,
+			port = tostring(node.port),
+			id = node.uuid,
+			aid = tostring(node.alter_id or "0"),
+			net = net,
+			type = node.tcp_guise or "none",
+			host = host or "",
+			path = path or "",
+			tls = (node.tls == "1") and "tls" or "",
+			sni = node.tls_serverName or ""
+		}
+		return "vmess://" .. b64(jsonStringify(obj))
+	end
+	local function build_vless(node)
+		if not node.address or not node.port or not node.uuid then return nil end
+		local params = {}
+		local transport = node.transport or "tcp"
+		if transport == "raw" then transport = "tcp" end
+		if transport == "xhttp" then transport = "http" end
+		if transport and transport ~= "" then params[#params + 1] = "type=" .. q(transport) end
+		if node.tls == "1" then params[#params + 1] = "security=" .. q(node.reality == "1" and "reality" or "tls") end
+		if node.tls_serverName and node.tls_serverName ~= "" then params[#params + 1] = "sni=" .. q(node.tls_serverName) end
+		if node.alpn and node.alpn ~= "" then params[#params + 1] = "alpn=" .. q(node.alpn) end
+		if node.fingerprint and node.fingerprint ~= "" then params[#params + 1] = "fp=" .. q(node.fingerprint) end
+		if transport == "ws" then
+			if node.ws_path and node.ws_path ~= "" then params[#params + 1] = "path=" .. q(node.ws_path) end
+			if node.ws_host and node.ws_host ~= "" then params[#params + 1] = "host=" .. q(node.ws_host) end
+		elseif transport == "grpc" then
+			if node.grpc_serviceName and node.grpc_serviceName ~= "" then params[#params + 1] = "serviceName=" .. q(node.grpc_serviceName) end
+			if node.grpc_mode and node.grpc_mode ~= "" then params[#params + 1] = "mode=" .. q(node.grpc_mode) end
+		elseif transport == "httpupgrade" then
+			if node.httpupgrade_path and node.httpupgrade_path ~= "" then params[#params + 1] = "path=" .. q(node.httpupgrade_path) end
+			if node.httpupgrade_host and node.httpupgrade_host ~= "" then params[#params + 1] = "host=" .. q(node.httpupgrade_host) end
+		elseif transport == "http" then
+			local _path = node.http_path or node.xhttp_path or ""
+			local _host = first_of(node.http_host)
+			if _host == "" then _host = node.xhttp_host or "" end
+			if _path ~= "" then params[#params + 1] = "path=" .. q(_path) end
+			if _host ~= "" then params[#params + 1] = "host=" .. q(_host) end
+		end
+		if node.flow and node.flow ~= "" then params[#params + 1] = "flow=" .. q(node.flow) end
+		if node.reality == "1" then
+			if node.reality_publicKey and node.reality_publicKey ~= "" then params[#params + 1] = "pbk=" .. q(node.reality_publicKey) end
+			if node.reality_shortId and node.reality_shortId ~= "" then params[#params + 1] = "sid=" .. q(node.reality_shortId) end
+			if node.reality_spiderX and node.reality_spiderX ~= "" then params[#params + 1] = "spx=" .. q(node.reality_spiderX) end
+		end
+		local link = "vless://" .. q(node.uuid) .. "@" .. node.address .. ":" .. node.port
+		if #params > 0 then link = link .. "?" .. table.concat(params, "&") end
+		link = link .. "#" .. q(node.remarks or (node.address .. ":" .. node.port))
+		return link
+	end
+	local function build_hy2(node)
+		if not node.address or not node.port then return nil end
+		local auth = node.hysteria2_auth_password or ""
+		local params = {}
+		if node.tls_serverName and node.tls_serverName ~= "" then params[#params + 1] = "sni=" .. q(node.tls_serverName) end
+		if node.tls_allowInsecure ~= nil and node.tls_allowInsecure ~= "" then params[#params + 1] = "insecure=" .. q(node.tls_allowInsecure) end
+		if node.hysteria2_obfs_password and node.hysteria2_obfs_password ~= "" then params[#params + 1] = "obfs-password=" .. q(node.hysteria2_obfs_password) end
+		if node.hysteria2_hop and node.hysteria2_hop ~= "" then params[#params + 1] = "mport=" .. q(node.hysteria2_hop) end
+		local link = "hy2://"
+		if auth ~= "" then link = link .. q(auth) .. "@" end
+		link = link .. node.address .. ":" .. node.port
+		if #params > 0 then link = link .. "?" .. table.concat(params, "&") end
+		link = link .. "#" .. q(node.remarks or (node.address .. ":" .. node.port))
+		return link
+	end
+	local function build_tuic(node)
+		if not node.address or not node.port or not node.uuid or not node.password then return nil end
+		local params = {}
+		if node.tls_serverName and node.tls_serverName ~= "" then params[#params + 1] = "sni=" .. q(node.tls_serverName) end
+		if node.tls_allowInsecure ~= nil and node.tls_allowInsecure ~= "" then params[#params + 1] = "allow_insecure=" .. q(node.tls_allowInsecure) end
+		if node.tuic_congestion_control and node.tuic_congestion_control ~= "" then params[#params + 1] = "congestion_control=" .. q(node.tuic_congestion_control) end
+		if node.tuic_udp_relay_mode and node.tuic_udp_relay_mode ~= "" then params[#params + 1] = "udp_relay_mode=" .. q(node.tuic_udp_relay_mode) end
+		if node.tuic_alpn and node.tuic_alpn ~= "" and node.tuic_alpn ~= "default" then params[#params + 1] = "alpn=" .. q(node.tuic_alpn) end
+		local link = "tuic://" .. q(node.uuid) .. ":" .. q(node.password) .. "@" .. node.address .. ":" .. node.port
+		if #params > 0 then link = link .. "?" .. table.concat(params, "&") end
+		link = link .. "#" .. q(node.remarks or (node.address .. ":" .. node.port))
+		return link
+	end
+	local function build_naive(node)
+		if not node.address or not node.port or not node.username or not node.password then return nil end
+		local params = {}
+		if node.tls_serverName and node.tls_serverName ~= "" then params[#params + 1] = "sni=" .. q(node.tls_serverName) end
+		if node.naive_insecure_concurrency and node.naive_insecure_concurrency ~= "" then params[#params + 1] = "insecure-concurrency=" .. q(node.naive_insecure_concurrency) end
+		local scheme = (node.naive_quic == "1") and "naive+quic" or "naive+https"
+		if node.naive_quic == "1" and node.naive_congestion_control and node.naive_congestion_control ~= "" then params[#params + 1] = "congestion_control=" .. q(node.naive_congestion_control) end
+		local link = scheme .. "://" .. q(node.username) .. ":" .. q(node.password) .. "@" .. node.address .. ":" .. node.port
+		if #params > 0 then link = link .. "?" .. table.concat(params, "&") end
+		link = link .. "#" .. q(node.remarks or (node.address .. ":" .. node.port))
+		return link
+	end
+	uci:foreach(appname, "nodes", function(node)
+		local node_group = node.group or "default"
+		if group == "" or group == node_group then
+			local type_name = node.type or ""
+			local protocol = node.protocol or ""
+			local link = nil
+			if type_name == "SS" then
+				link = build_ss(node)
+			elseif type_name == "SSR" then
+				link = build_ssr(node)
+			elseif type_name == "Trojan-Plus" then
+				link = build_trojan(node)
+			elseif (type_name == "Xray" or type_name == "sing-box") and protocol == "vmess" then
+				link = build_vmess(node)
+			elseif (type_name == "Xray" or type_name == "sing-box") and protocol == "vless" then
+				link = build_vless(node)
+			elseif (type_name == "Xray" or type_name == "sing-box") and protocol == "trojan" then
+				link = build_trojan(node)
+			elseif (type_name == "Xray" or type_name == "sing-box") and protocol == "shadowsocks" then
+				link = build_ss(node)
+			elseif (type_name == "Xray" or type_name == "sing-box") and protocol == "hysteria2" then
+				link = build_hy2(node)
+			elseif type_name == "Hysteria2" then
+				link = build_hy2(node)
+			elseif (type_name == "sing-box") and protocol == "tuic" then
+				link = build_tuic(node)
+			elseif (type_name == "sing-box") and protocol == "naive" then
+				link = build_naive(node)
+			end
+			if link and link ~= "" then
+				links[#links + 1] = link
+			else
+				add_unsupported(node, type_name .. ((protocol ~= "" and ("/" .. protocol)) or ""))
+			end
+		end
+	end)
+	local output = table.concat(links, "\n")
+	if not raw then
+		output = b64(output)
+	end
+	if #unsupported > 0 then
+		output = output .. "\n\n" .. table.concat(unsupported, "\n")
+	end
+	http.prepare_content("text/plain")
+	http.write(output)
+end
+
+function check_nodes_status()
+	local result = {}
+	uci:foreach(appname, "nodes", function(node)
+		local address = node.address or ""
+		local port = node.port or node.hysteria_hop or node.hysteria2_hop or ""
+		local remarks = node.remarks or node[".name"]
+		local item = {
+			id = node[".name"],
+			remarks = remarks,
+			group = node.group or "default",
+			address = address,
+			port = port,
+			status = "unknown"
+		}
+		if address ~= "" then
+			local ok = luci.sys.call(string.format("ping -c 1 -W 1 %q >/dev/null 2>&1", address)) == 0
+			item.status = ok and "alive" or "timeout"
+		end
+		result[#result + 1] = item
+	end)
+	http_write_json_ok(result)
+end
+
+function custom_update_passwall()
+	local branch = http.formvalue("branch") or "laogao"
+	local repo = http.formvalue("repo") or "https://github.com/gc89925/istore-passwall"
+	local release_base = http.formvalue("release_base") or "https://github.com/gc89925/istore-passwall/releases/latest/download"
+	local filename = http.formvalue("filename") or "luci-app-passwall_all.ipk"
+	local manifest_url = http.formvalue("manifest_url") or (release_base .. "/manifest.json")
+	local script = "/usr/share/passwall/passwall-custom-update.sh"
+	local cmd
+	if fs.access(script) then
+		cmd = string.format("sh %q %q %q %q", script, release_base, filename, manifest_url)
+	else
+		local tmpfile = "/tmp/" .. filename
+		cmd = string.format([[sh -c '
+set -e
+URL="%s/%s"
+echo "[PassWall Custom Update] start"
+echo "repo: %s"
+echo "branch: %s"
+echo "manifest: %s"
+echo "download: $URL"
+rm -f "%s"
+curl -L --fail -o "%s" "$URL"
+opkg install "%s"
+echo "[PassWall Custom Update] ok"
+']], release_base, filename, repo, branch, manifest_url, tmpfile, tmpfile, tmpfile)
+	end
+	local output = luci.sys.exec(cmd .. " 2>&1")
+	local logfile = "/tmp/passwall-custom-update/install.log"
+	if fs.access(logfile) then
+		output = output .. "\n\n==== install.log ====\n" .. luci.sys.exec("cat " .. logfile .. " 2>/dev/null")
+	end
+	local ok = output and output:find("%[PassWall Custom Update%] ok", 1, false)
+	http_write_json({ success = ok and true or false, msg = output })
 end
 
 function flush_set()
